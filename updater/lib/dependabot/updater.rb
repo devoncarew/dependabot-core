@@ -181,21 +181,23 @@ module Dependabot
         d.version == d.previous_version
       end
 
-      # NOTE: Gradle, Maven and Nuget dependency names can be case-insensitive
-      # and the dependency name in the security advisory often doesn't match
-      # what users have specified in their manifest.
-      job_dependencies = job.dependencies.map(&:downcase)
-      if updated_deps.map(&:name).map(&:downcase) != job_dependencies
+      dependency_change = Dependabot::DependencyChange.new(
+        job: job,
+        dependenices: updated_deps,
+        updated_dependency_files: updated_files
+      )
+
+      if !dependency_change.matches_requested_dependency_changes?
         # The dependencies being updated have changed. Close the existing
         # multi-dependency PR and try creating a new one.
         close_pull_request(reason: :dependencies_changed)
-        create_pull_request(updated_deps, updated_files, pr_message(updated_deps, updated_files))
-      elsif existing_pull_request(updated_deps)
+        create_pull_request(dependency_change)
+      elsif existing_pull_request(dependency_change)
         # The existing PR is for this version. Update it.
-        update_pull_request(updated_deps, updated_files)
+        update_pull_request(dependency_change)
       else
         # The existing PR is for a previous version. Supersede it.
-        create_pull_request(updated_deps, updated_files, pr_message(updated_deps, updated_files))
+        create_pull_request(dependency_change)
       end
     end
     # rubocop:enable Metrics/AbcSize
@@ -307,7 +309,14 @@ module Dependabot
 
         d.version == d.previous_version
       end
-      create_pull_request(updated_deps, updated_files, pr_message(updated_deps, updated_files))
+
+      dependency_change = Dependabot::DependencyChange.new(
+        job: job,
+        dependenices: updated_deps,
+        updated_dependency_files: updated_files
+      )
+
+      create_pull_request(dependency_change)
     end
     # rubocop:enable Metrics/MethodLength
     # rubocop:enable Metrics/AbcSize
@@ -583,19 +592,9 @@ module Dependabot
         any? { |pr| pr.fetch("dependency-version", nil) == latest_version }
     end
 
-    def existing_pull_request(updated_dependencies)
-      new_pr_set = Set.new(
-        updated_dependencies.map do |dep|
-          {
-            "dependency-name" => dep.name,
-            "dependency-version" => dep.version,
-            "dependency-removed" => dep.removed? ? true : nil
-          }.compact
-        end
-      )
-
-      job.existing_pull_requests.find { |pr| Set.new(pr) == new_pr_set } ||
-        created_pull_requests.find { |pr| Set.new(pr) == new_pr_set }
+    def existing_pull_request(dependency_change)
+      dependency_change.existing_pull_request ||
+        created_pull_requests.find { |created_pr| created_pr == dependency_change.to_set }
     end
 
     # rubocop:disable Metrics/PerceivedComplexity
@@ -741,35 +740,19 @@ module Dependabot
       updater.updated_dependency_files
     end
 
-    def create_pull_request(dependencies, updated_dependency_files, pr_message)
-      logger_info("Submitting #{dependencies.map(&:name).join(', ')} " \
+    def create_pull_request(dependency_change)
+      logger_info("Submitting #{dependency_change.dependencies.map(&:name).join(', ')} " \
                   "pull request for creation")
 
-      service.create_pull_request(
-        dependencies,
-        updated_dependency_files.map(&:to_h),
-        base_commit_sha,
-        pr_message
-      )
-
-      created_pull_requests << dependencies.map do |dep|
-        {
-          "dependency-name" => dep.name,
-          "dependency-version" => dep.version,
-          "dependency-removed" => dep.removed? ? true : nil
-        }.compact
-      end
+      service.create_pull_request(dependency_change, base_commit_sha)
+      created_pull_requests << dependency_change.to_set
     end
 
-    def update_pull_request(dependencies, updated_dependency_files)
-      logger_info("Submitting #{dependencies.map(&:name).join(', ')} " \
+    def update_pull_request(dependency_change)
+      logger_info("Submitting #{dependency_change.dependencies.map(&:name).join(', ')} " \
                   "pull request for update")
 
-      service.update_pull_request(
-        dependencies,
-        updated_dependency_files.map(&:to_h),
-        base_commit_sha
-      )
+      service.update_pull_request(dependency_change, base_commit_sha)
     end
 
     def close_pull_request(reason:)
@@ -954,25 +937,8 @@ module Dependabot
 
       record_error(error_details) if error_details
     end
-
     # rubocop:enable Metrics/MethodLength
     # rubocop:enable Metrics/CyclomaticComplexity
-    def pr_message(dependencies, files)
-      Dependabot::PullRequestCreator::MessageBuilder.new(
-        source: job.source,
-        dependencies: dependencies,
-        files: files,
-        credentials: credentials,
-        commit_message_options: job.commit_message_options,
-        # This ensures that PR messages we build replace github.com links with
-        # a redirect that stop markdown enriching them into mentions on the source
-        # repository.
-        #
-        # TODO: Promote this value to a constant or similar once we have
-        # updated core to avoid surprise outcomes if this is unset.
-        github_redirection_service: "github-redirect.dependabot.com"
-      ).message
-    end
 
     def update_dependency_list(dependencies)
       service.update_dependency_list(
