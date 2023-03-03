@@ -867,7 +867,6 @@ RSpec.describe Dependabot::Updater do
       service = build_service(job: job)
       updater = build_updater(service: service, job: job)
 
-      job_id = 1
       dependencies = [
         {
           name: "dummy-pkg-a",
@@ -908,7 +907,6 @@ RSpec.describe Dependabot::Updater do
       service = build_service(job: job)
       updater = build_updater(service: service, job: job)
 
-      job_id = 1
       dependencies = [have_attributes(name: "dummy-pkg-b")]
       updated_dependency_files = [
         {
